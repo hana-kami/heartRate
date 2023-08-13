@@ -1,0 +1,528 @@
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE RUNLED
+OBJECT MODULE PLACED IN .\Objects\RunLed.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE RunLed.c OPTIMIZE(8,SPEED) BROWSE DEBUG OBJECTEXTEND PRINT(.\Listings\Ru
+                    -nLed.lst) TABS(2) OBJECT(.\Objects\RunLed.obj)
+
+line level    source
+
+   1          #include <reg52.h>
+   2          #include "stdio.h"
+   3          #include <string.h>
+   4          #include <stdlib.h>
+   5          #include <LCD1602.h>
+   6          #include "intrins.h"
+   7          //************************************
+   8          #define  uint  unsigned int
+   9          #define  uchar unsigned char
+  10          #define  Nack_counter  10
+  11          #define false 0
+  12          #define true 1
+  13          #define FOSC 11059200L    //系统时钟
+  14          #define BAUD 115200       //系统时钟
+  15          #define T0MS (65536-FOSC/12/500)    //500HZ in 12T MODE
+  16          #define ADC_POWER 0x80      //ADC POWER CONTROL BIT
+  17          #define ADC_FLAG 0x10     //ADC COMPLETE FLAG
+  18          #define ADC_START 0x08;     //ADC START CONTROL BIT
+  19          #define ADC_SPEEDLL 0x00    //540 CLOCKS
+  20          #define ADC_SPEEDL 0x20     //360 CLOCKS
+  21          #define ADC_SPEEDH 0x40     //180 CLOCKS
+  22          #define ADC_SPEEDHH 0x60    //90 CLOCKS
+  23          #define ADC_MASK 0x01
+  24          //GY906 端口定义
+  25          sbit  SCL=P1^3;// 时钟线
+  26          sbit  SDA=P1^4;// 数据线
+  27          sbit beep=P1^7;       //蜂鸣器
+  28          sbit k1=P1^1;           //按键引脚     
+  29          sbit k2=P1^2;           
+  30          sbit k3=P1^5;
+  31          sbit k4=P1^6; 
+  32          //sbit k5=P1^7; 
+  33          //************ 数据定义****************
+  34          bdata uchar flag;//可位寻址数据
+  35          sbit bit_out=flag^7;
+  36          sbit bit_in=flag^0;
+  37          uchar DataH,DataL,Pecreg;
+  38          int hl=110,Mtemp = 38;
+  39          int wKey = 0;
+  40          unsigned char PulsePin = 0;       // Pulse Sensor purple wire connected to analog pin 0(P1.0????????????)
+  41          // these variables are volatile because they are used during the interrupt service routine!
+  42          volatile unsigned int BPM;                   // used to hold the pulse rate
+  43          volatile unsigned int Signal;                // holds the incoming raw data
+  44          volatile unsigned int IBI = 600;             // holds the time between beats, must be seeded! 
+  45          volatile bit Pulse = false;     // true when pulse wave is high, false when it's low
+  46          volatile bit QS = false;        // becomes true when Arduoino finds a beat.
+  47          volatile int rate[10];                    // array to hold last ten IBI values
+  48          volatile unsigned long sampleCounter = 0;          // used to determine pulse timing
+  49          volatile unsigned long lastBeatTime = 0;           // used to find IBI
+  50          volatile int Peak =512;                      // used to find peak in pulse wave, seeded
+  51          volatile int Trough = 512;                     // used to find trough in pulse wave, seeded
+  52          volatile int thresh = 512;                // used to find instant moment of heart beat, seeded
+  53          volatile int amp = 100;                   // used to hold amplitude of pulse waveform, seeded
+  54          int value  = 0;                 
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 2   
+
+  55          volatile bit firstBeat = true;        // used to seed rate array so we startup with reasonable BPM
+  56          volatile bit secondBeat = false;      // used to seed rate array so we startup with reasonable BPM
+  57          unsigned char DisBuff[4]={0};
+  58          
+  59          //************ 函数声明*****************************************
+  60          void   IIC_Start();                 //GY906 发起始位子程序
+  61          void   IIC_Stop();                 //GY906发结束位子程序
+  62          uchar  GY906_RX_Byte(void);              //GY906 接收字节子程序
+  63          void   GY906_tx_Bit(void);             //GY906发送位子程序
+  64          void   GY906_TX_Byte(uchar dat_byte);     //GY906 接收字节子程序
+  65          void   GY906_rx_Bit(void);           //GY906接收位子程序
+  66          int keyscan();                        //键盘函数
+  67          uint   memread(void);             // 读温度数据
+  68          void ADC_init(unsigned char channel);
+  69          void T0_init(void);
+  70          void convertToCelsius(uint Tem, uint* integerPart, uint* decimalPart);
+  71          void Delay_10us(unsigned int time)
+  72          {
+  73   1        while(time--);
+  74   1      }
+  75          
+  76          void sys_init()
+  77          {   
+  78   1        ADC_init(PulsePin);
+  79   1        T0_init();                 // sets up to read Pulse Sensor signal every 2mS  
+  80   1        LCD_Init();
+  81   1      }
+  82          //*************主函数*******************************************
+  83          void main()
+  84          {
+  85   1        
+  86   1           uint Tem,tem1,tem2;
+  87   1          uint i,addn,n = 1;
+  88   1          uint Mflag = 0;
+  89   1          sys_init(); 
+  90   1            beep = 0;
+  91   1              //函数部分
+  92   1              SCL=1;SDA=1;_nop_();
+  93   1              _nop_();_nop_();_nop_();
+  94   1              SCL=0;
+  95   1              Delay(1000);
+  96   1              SCL=1;      
+  97   1              while(1)
+  98   1              {   
+  99   2                wKey = keyscan();
+ 100   2                if(wKey == 1)
+ 101   2                {
+ 102   3                  if(Mflag % 2 == 0)
+ 103   3                  {
+ 104   4                    Mtemp++;
+ 105   4                  }else{
+ 106   4                    hl++;
+ 107   4                  }
+ 108   3                }
+ 109   2                if(wKey == 2)
+ 110   2                {
+ 111   3                  if(Mflag % 2 == 0)
+ 112   3                  {
+ 113   4                    Mtemp--;
+ 114   4                  }else{
+ 115   4                    hl--;
+ 116   4                  } 
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 3   
+
+ 117   3                }
+ 118   2                if(wKey == 3)
+ 119   2                {
+ 120   3                  Mflag++;
+ 121   3                }
+ 122   2                if(wKey == 4)
+ 123   2                {
+ 124   3                  n++;
+ 125   3                  if(n%2 == 0)
+ 126   3                  {
+ 127   4                    addn = 0;
+ 128   4                  }else
+ 129   3                  {
+ 130   4                    addn = 1;
+ 131   4                  }
+ 132   3                  //LCD_ShowNum(1,8,4,1 );        
+ 133   3                }
+ 134   2                
+ 135   2      //          if(wKey == 5)
+ 136   2      //          {
+ 137   2      //            Mflag = 122;  
+ 138   2      //            //LCD_ShowNum(1,5,1,1 );  
+ 139   2      //          }
+ 140   2                if(addn == 0)
+ 141   2                {
+ 142   3                  LCD_ShowString(1,1,"                ");         
+ 143   3                  LCD_ShowString(2,1,"                ");                       
+ 144   3                  LCD_ShowString(1,0," Welcome to use");
+ 145   3                  Delay(138);
+ 146   3                }
+ 147   2                if(addn == 1)
+ 148   2                {
+ 149   3                  if (QS == true){
+ 150   4                  QS = false; 
+ 151   4                  }
+ 152   3                Tem=memread();
+ 153   3                i = 0;
+ 154   3                value=0;
+ 155   3                while (DisBuff[i] == '\0') {
+ 156   4                i++;
+ 157   4                }
+ 158   3                for (; i < 3; i++) {
+ 159   4                if (DisBuff[i] >= '0' && DisBuff[i] <= '9') {
+ 160   5                  value = value * 10 + (DisBuff[i] - '0');
+ 161   5                }
+ 162   4                }
+ 163   3                //value = (DisBuff[0] - '0') * 100 + (DisBuff[1] - '0') * 10 + (DisBuff[2] - '0');
+ 164   3      //          for (i = 0; i < 3; i++) {
+ 165   3      //           if (DisBuff[i] >= '0' && DisBuff[i] <= '9') {
+ 166   3      //            value = value * 10 + DisBuff[i];
+ 167   3      //            }
+ 168   3      //            else if (i == 0) {
+ 169   3      //            value = value * 100;
+ 170   3      //          }
+ 171   3                //}
+ 172   3                convertToCelsius(Tem,&tem1,&tem2);          
+ 173   3                Delay(138);           
+ 174   3                  LCD_ShowString(1,1,"h:      t:      ");         //显示默认
+ 175   3                //LCD_ShowString(1,1,"h:             ");          //显示默认
+ 176   3                LCD_ShowNum(1,3,value,3);
+ 177   3                //LCD_ShowString(1,12,DisBuff);         //显示心率
+ 178   3                  LCD_ShowNum(1,12,tem1,2);
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 4   
+
+ 179   3                LCD_ShowString(1,14,".");         //显示心率
+ 180   3                LCD_ShowNum(1,15,tem2,2);
+ 181   3                  LCD_ShowString(2,1,"Def H:     T:");          //显示阈值
+ 182   3                  LCD_ShowNum(2,14,Mtemp,2 );
+ 183   3                  LCD_ShowNum(2,7,hl,3);
+ 184   3                  if(tem1 > Mtemp||value>hl)
+ 185   3                  {             
+ 186   4                    beep = 1;
+ 187   4                    Delay(1000);
+ 188   4                    beep = 0;           
+ 189   4                  }
+ 190   3                }
+ 191   2                
+ 192   2      }     
+ 193   1      }
+ 194          void convertToCelsius(uint Tem,uint* integerPart, uint* decimalPart)
+ 195          { 
+ 196   1        uint T = Tem * 2;
+ 197   1          if (T >= 27315) 
+ 198   1          { 
+ 199   2              T = T - 27315; 
+ 200   2              *integerPart = T / 100; 
+ 201   2              *decimalPart = T % 100; 
+ 202   2          }
+ 203   1          else 
+ 204   1          {
+ 205   2              *integerPart = 0;
+ 206   2              *decimalPart = 0;
+ 207   2          }
+ 208   1      }
+ 209          //************************************
+ 210          void IIC_Start(void)
+ 211          {
+ 212   1         SDA=1;
+ 213   1         _nop_();_nop_();_nop_();_nop_();_nop_();
+ 214   1         SCL=1;
+ 215   1         _nop_();_nop_();_nop_();_nop_();_nop_();
+ 216   1         SDA=0;
+ 217   1         _nop_();_nop_();_nop_();_nop_();_nop_();
+ 218   1         SCL=0;
+ 219   1         _nop_();_nop_();_nop_();_nop_();_nop_();
+ 220   1      }
+ 221          //------------------------------
+ 222          void IIC_Stop(void)
+ 223          {
+ 224   1      
+ 225   1         SCL=0;
+ 226   1         _nop_();_nop_();_nop_();_nop_();_nop_();
+ 227   1         SDA=0;
+ 228   1         _nop_();_nop_();_nop_();_nop_();_nop_();
+ 229   1         SCL=1;
+ 230   1         _nop_();_nop_();_nop_();_nop_();_nop_();
+ 231   1         SDA=1;
+ 232   1      }
+ 233          //--------- 发送一个字节---------
+ 234          void  GY906_TX_Byte(uchar dat_byte)
+ 235          {
+ 236   1         char i,n,dat;
+ 237   1         n=Nack_counter;
+ 238   1      TX_again:
+ 239   1         dat=dat_byte;
+ 240   1         for(i=0;i<8;i++)
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 5   
+
+ 241   1         {
+ 242   2           if(dat&0x80)
+ 243   2            bit_out=1;
+ 244   2           else
+ 245   2            bit_out=0;
+ 246   2           GY906_tx_Bit();
+ 247   2           dat=dat<<1;
+ 248   2         }
+ 249   1         
+ 250   1            GY906_rx_Bit();
+ 251   1         if(bit_in==1)
+ 252   1         {
+ 253   2          IIC_Stop();
+ 254   2          if(n!=0)
+ 255   2          {n--;goto Repeat;}
+ 256   2          else
+ 257   2           goto exit;
+ 258   2         }
+ 259   1         else
+ 260   1          goto exit;
+ 261   1      Repeat:
+ 262   1          IIC_Start();
+ 263   1          goto TX_again;
+ 264   1      exit: ;
+ 265   1      }
+ 266          //-----------发送一个位---------
+ 267          void  GY906_tx_Bit(void)
+ 268          {
+ 269   1        if(bit_out==0) SDA=0;
+ 270   1        else SDA=1;
+ 271   1        _nop_();
+ 272   1        SCL=1;
+ 273   1        _nop_();_nop_();_nop_();_nop_();
+ 274   1        _nop_();_nop_();_nop_();_nop_();
+ 275   1        SCL=0;
+ 276   1        _nop_();_nop_();_nop_();_nop_();
+ 277   1        _nop_();_nop_();_nop_();_nop_();
+ 278   1      }
+ 279          //---------- 接收一个字节--------
+ 280          uchar GY906_RX_Byte(void)
+ 281          {
+ 282   1        uchar i,dat;
+ 283   1        dat=0;
+ 284   1        for(i=0;i<8;i++)
+ 285   1        {
+ 286   2          dat=dat<<1;
+ 287   2          GY906_rx_Bit();
+ 288   2          if(bit_in==1)
+ 289   2           dat=dat+1;
+ 290   2        }
+ 291   1        GY906_tx_Bit();
+ 292   1        return dat;
+ 293   1      }
+ 294          //---------- 接收一个位----------
+ 295          void GY906_rx_Bit(void)
+ 296          {
+ 297   1        SDA=1;bit_in=1;
+ 298   1        SCL=1;
+ 299   1        _nop_();_nop_();_nop_();_nop_();
+ 300   1        _nop_();_nop_();_nop_();_nop_();
+ 301   1        bit_in=SDA;
+ 302   1        _nop_();
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 6   
+
+ 303   1        SCL=0;
+ 304   1        _nop_();_nop_();_nop_();_nop_();
+ 305   1        _nop_();_nop_();_nop_();_nop_();
+ 306   1      }
+ 307          //------------------------------
+ 308          uint memread(void)
+ 309          {
+ 310   1        IIC_Start();
+ 311   1        GY906_TX_Byte(0xB4);  //Send SlaveAddress ==============================
+ 312   1        //GY906_TX_Byte(0x00);
+ 313   1        GY906_TX_Byte(0x07);  //Send Command
+ 314   1        //------------
+ 315   1        IIC_Start();
+ 316   1        GY906_TX_Byte(0x01);
+ 317   1        bit_out=0;
+ 318   1        DataL=GY906_RX_Byte();
+ 319   1        bit_out=0;
+ 320   1        DataH=GY906_RX_Byte();
+ 321   1        bit_out=1;
+ 322   1        Pecreg=GY906_RX_Byte();
+ 323   1        IIC_Stop();
+ 324   1        return(DataH*256+DataL);
+ 325   1      }
+ 326          int keyscan()
+ 327          {
+ 328   1        //----------------------按键检测---------------
+ 329   1        if(k1==0||k2==0||k3==0||k4==0)
+ 330   1        {
+ 331   2        if(k1==0)
+ 332   2        {
+ 333   3          Delay(20);
+ 334   3          if(k1==0)
+ 335   3          {
+ 336   4            return 1;
+ 337   4          }
+ 338   3      
+ 339   3        }
+ 340   2        if(k2==0)
+ 341   2        {
+ 342   3          Delay(20);
+ 343   3          if(k2==0)
+ 344   3          {
+ 345   4            return 2;
+ 346   4          }
+ 347   3        }
+ 348   2        if(k3==0)
+ 349   2        {
+ 350   3          Delay(20);
+ 351   3          if(k3==0)
+ 352   3          {
+ 353   4            return 3;
+ 354   4          }
+ 355   3        }
+ 356   2        if(k4==0)
+ 357   2        {
+ 358   3          Delay(20);
+ 359   3          if(k4==0)
+ 360   3          {
+ 361   4            return 4;
+ 362   4          }
+ 363   3        }
+ 364   2      //  if(k5==0)
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 7   
+
+ 365   2      //  {
+ 366   2      //    Delay(20);
+ 367   2      //    if(k5==0)
+ 368   2      //    {
+ 369   2      //      return 5;
+ 370   2      //    }
+ 371   2      //  }
+ 372   2        }
+ 373   1        return 0;
+ 374   1      }
+ 375          void T0_init(void){     
+ 376   1        // Initializes Timer0 to throw an interrupt every 2mS.
+ 377   1        TMOD |= 0x01; //16bit TIMER
+ 378   1        TL0=T0MS;
+ 379   1        TH0=T0MS>>8;
+ 380   1        TR0=1;    //start Timer 0
+ 381   1        ET0=1;    //enable Timer Interrupt
+ 382   1        EA=1;             // MAKE SURE GLOBAL INTERRUPTS ARE ENABLED      
+ 383   1      } 
+ 384          
+ 385          void ADC_init(unsigned char channel)
+ 386          {
+ 387   1        P1ASF=ADC_MASK<<channel;  //enable PlusePin as ADC INPUT
+ 388   1        ADC_RES=0;  //clear former ADC result
+ 389   1        ADC_RESL=0; //clear former ADC result
+ 390   1        AUXR1 |= 0x04;  //adjust the format of ADC result
+ 391   1        ADC_CONTR=channel|ADC_POWER|ADC_SPEEDLL|ADC_START;  //power on ADC and start conversion
+ 392   1      }
+ 393          
+ 394          unsigned int analogRead(unsigned char channel)
+ 395          {
+ 396   1        unsigned int result;
+ 397   1      
+ 398   1        ADC_CONTR &=!ADC_FLAG;  //clear ADC FLAG
+ 399   1        result=ADC_RES;
+ 400   1        result=result<<8;
+ 401   1        result+=ADC_RESL;
+ 402   1        ADC_CONTR|=channel|ADC_POWER|ADC_SPEEDLL|ADC_START;
+ 403   1        return result;
+ 404   1      }
+ 405          // Timer 0?ж???????2MS?ж???Σ????AD????????????
+ 406          void Timer0_rountine(void) interrupt 1
+ 407          {                       
+ 408   1        int N;
+ 409   1        unsigned char i;
+ 410   1        // keep a running total of the last 10 IBI values
+ 411   1        unsigned int runningTotal = 0;                  // clear the runningTotal variable    
+ 412   1      
+ 413   1        EA=0;                                      // disable interrupts while we do this
+ 414   1        TL0=T0MS;
+ 415   1        TH0=T0MS>>8;        //reload 16 bit TIMER0
+ 416   1        Signal = analogRead(PulsePin);              // read the Pulse Sensor 
+ 417   1        sampleCounter += 2;                         // keep track of the time in mS with this variable
+ 418   1        N = sampleCounter - lastBeatTime;       // monitor the time since the last beat to avoid noise
+ 419   1      
+ 420   1      
+ 421   1          //  find the peak and trough of the pulse wave
+ 422   1        if(Signal < thresh && N > (IBI/5)*3){       // avoid dichrotic noise by waiting 3/5 of last IBI
+ 423   2          if (Signal < Trough){                        // T is the trough
+ 424   3            Trough = Signal;                         // keep track of lowest point in pulse wave 
+ 425   3          }
+ 426   2        }
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 8   
+
+ 427   1      
+ 428   1        if(Signal > thresh && Signal > Peak){          // thresh condition helps avoid noise
+ 429   2          Peak = Signal;                             // P is the peak
+ 430   2        }                                        // keep track of highest point in pulse wave
+ 431   1        if (N > 250){                                   // avoid high frequency noise
+ 432   2          if ( (Signal > thresh) && (Pulse == false) && (N > (IBI/5)*3) ){        
+ 433   3            Pulse = true;                               // set the Pulse flag when we think there is a pulse
+ 434   3      //      blinkPin=0;               // turn on pin 13 LED
+ 435   3            IBI = sampleCounter - lastBeatTime;         // measure time between beats in mS
+ 436   3            lastBeatTime = sampleCounter;               // keep track of time for next pulse
+ 437   3      
+ 438   3            if(secondBeat){                        // if this is the second beat, if secondBeat == TRUE
+ 439   4              secondBeat = false;                  // clear secondBeat flag
+ 440   4              for(i=0; i<=9; i++){             // seed the running total to get a realisitic BPM at startup
+ 441   5                rate[i] = IBI;                      
+ 442   5              }
+ 443   4            }
+ 444   3            if(firstBeat){                         // if it's the first time we found a beat, if firstBeat == TR
+             -UE
+ 445   4              firstBeat = false;                   // clear firstBeat flag
+ 446   4              secondBeat = true;                   // set the second beat flag
+ 447   4              EA=1;                               // enable interrupts again
+ 448   4              return;                              // IBI value is unreliable so discard it
+ 449   4            }   
+ 450   3            for(i=0; i<=8; i++){                // shift data in the rate array
+ 451   4              rate[i] = rate[i+1];                  // and drop the oldest IBI value 
+ 452   4              runningTotal += rate[i];              // add up the 9 oldest IBI values
+ 453   4            }
+ 454   3      
+ 455   3            rate[9] = IBI;                          // add the latest IBI to the rate array
+ 456   3            runningTotal += rate[9];                // add the latest IBI to runningTotal
+ 457   3            runningTotal /= 10;                     // average the last 10 IBI values 
+ 458   3            BPM = 60000/runningTotal;               // how many beats can fit into a minute? that's BPM!
+ 459   3            if(BPM>200)BPM=200;     //限制BPM最高显示值
+ 460   3            if(BPM<30)BPM=30;       ///限制BPM最高显示值
+ 461   3            DisBuff[2]   = BPM%10+48;//???λ??
+ 462   3            DisBuff[1]   = BPM%100/10+48; //??λ??
+ 463   3            DisBuff[0]   = BPM/100+48;     //??λ??
+ 464   3            if(DisBuff[0]==48)
+ 465   3              DisBuff[0]=32;
+ 466   3            QS = true;                              // set Quantified Self flag 
+ 467   3            // QS FLAG IS NOT CLEARED INSIDE THIS ISR
+ 468   3          }                       
+ 469   2        }
+ 470   1        if (Signal < thresh && Pulse == true){   // when the values are going down, the beat is over
+ 471   2      //    blinkPin=1;            // turn off pin 13 LED
+ 472   2          Pulse = false;                         // reset the Pulse flag so we can do it again
+ 473   2          amp = Peak - Trough;                           // get amplitude of the pulse wave
+ 474   2          thresh = amp/2 + Trough;                    // set thresh at 50% of the amplitude
+ 475   2          Peak = thresh;                            // reset these for next time
+ 476   2          Trough = thresh;
+ 477   2        }
+ 478   1        if (N > 2500){                           // if 2.5 seconds go by without a beat
+ 479   2          thresh = 512;                          // set thresh default
+ 480   2          Peak = 512;                               // set P default
+ 481   2          Trough = 512;                               // set T default
+ 482   2          lastBeatTime = sampleCounter;          // bring the lastBeatTime up to date        
+ 483   2          firstBeat = true;                      // set these to avoid noise
+ 484   2          secondBeat = false;                    // when we get the heartbeat back
+ 485   2        }
+ 486   1        EA=1;                                   // enable interrupts when youre done!
+ 487   1      }// end isr
+C51 COMPILER V9.54   RUNLED                                                                05/10/2023 12:48:33 PAGE 9   
+
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1690    ----
+   CONSTANT SIZE    =     66    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     59      31
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      4    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
